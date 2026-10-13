@@ -1,4 +1,7 @@
-
+const {
+  BlobServiceClient,
+  StorageSharedKeyCredential
+} = require("@azure/storage-blob");
 require("dotenv").config();
 
 const express = require("express");
@@ -6,7 +9,6 @@ const multer = require("multer");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { createClient } = require("@supabase/supabase-js");
 const {
   S3Client,
   PutObjectCommand,
@@ -38,6 +40,37 @@ if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
 const key = Buffer.from(hex, "hex");
 const useS3 = MODE === "s3";
 const useSupabase = MODE === "supabase";
+const useAzure = MODE === "azure";
+const azureAccountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+const azureAccountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+const azureContainerName =
+  process.env.AZURE_STORAGE_CONTAINER || "securecloud-files";
+
+const azureConfigured =
+  Boolean(azureAccountName && azureAccountKey);
+
+  let azureContainerClient = null;
+
+if (useAzure) {
+  if (!azureConfigured) {
+    throw new Error(
+      "Azure storage selected, but Azure credentials are missing."
+    );
+  }
+
+  const credential = new StorageSharedKeyCredential(
+    azureAccountName,
+    azureAccountKey
+  );
+
+  const blobServiceClient = new BlobServiceClient(
+    `https://${azureAccountName}.blob.core.windows.net`,
+    credential
+  );
+
+  azureContainerClient =
+    blobServiceClient.getContainerClient(azureContainerName);
+}
 
 if (
   useSupabase &&
@@ -121,6 +154,20 @@ function decrypt(buffer) {
 }
 
 async function put(objectKey, buffer) {
+
+  if (useAzure) {
+    const blockBlobClient =
+      azureContainerClient.getBlockBlobClient(objectKey);
+
+    await blockBlobClient.uploadData(buffer, {
+      blobHTTPHeaders: {
+        blobContentType: "application/octet-stream",
+      },
+    });
+
+    return;
+  }
+
   if (useS3) {
     await s3.send(
       new PutObjectCommand({
@@ -156,6 +203,21 @@ async function put(objectKey, buffer) {
 }
 
 async function get(objectKey) {
+
+  if (useAzure) {
+    const blockBlobClient =
+      azureContainerClient.getBlockBlobClient(objectKey);
+
+    const downloadResponse = await blockBlobClient.download(0);
+    const chunks = [];
+
+    for await (const chunk of downloadResponse.readableStreamBody) {
+      chunks.push(Buffer.from(chunk));
+    }
+
+    return Buffer.concat(chunks);
+  }
+
   if (useS3) {
     const result = await s3.send(
       new GetObjectCommand({
@@ -187,6 +249,15 @@ async function get(objectKey) {
 }
 
 async function del(objectKey) {
+
+  if (useAzure) {
+    const blockBlobClient =
+      azureContainerClient.getBlockBlobClient(objectKey);
+
+    await blockBlobClient.deleteIfExists();
+    return;
+  }
+
   if (useS3) {
     await s3.send(
       new DeleteObjectCommand({
